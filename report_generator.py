@@ -9,6 +9,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 from openpyxl.formatting.rule import CellIsRule
+from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
@@ -436,13 +437,13 @@ class ReportGenerator:
             self._apply_conditional_formatting_rule(ws, col_map['needs_review'], 'YES', fills['red'], Font(bold=True))
 
     def _process_hyperlinks(self, ws, link_font):
-        """Process and convert hyperlinks."""
+        """Process and convert hyperlinks, creating hidden columns for additional links."""
         # Process regular link columns
         header_row = [cell.value for cell in ws[1]]
         link_columns = [idx for idx, h in enumerate(header_row, 1) if 'Link' in str(h) or 'Documents' in str(h)]
 
         for col_idx in link_columns:
-            for row_idx in range(2, min(ws.max_row + 1, 1002)):
+            for row_idx in range(2, ws.max_row + 1):
                 cell = ws.cell(row_idx, col_idx)
                 cell_value = str(cell.value or '')
 
@@ -456,18 +457,75 @@ class ReportGenerator:
                         cell.value = "Open File"
                     cell.font = link_font
 
-        # Process source columns with value|||link format
+        # Track columns that need helper columns
+        columns_needing_helpers = {}  # {col_idx: max_files_needed}
+
+        # First pass: identify columns with multiple files
         for col_idx in range(1, ws.max_column + 1):
-            for row_idx in range(2, min(ws.max_row + 1, 1002)):
+            max_files = 0
+            for row_idx in range(2, ws.max_row + 1):
+                cell = ws.cell(row_idx, col_idx)
+                cell_value = str(cell.value or '')
+
+                if '|||' in cell_value and ' | ' in cell_value:
+                    file_count = cell_value.count(' | ') + 1
+                    max_files = max(max_files, file_count)
+
+            if max_files > 1:
+                columns_needing_helpers[col_idx] = max_files
+
+        # Insert helper columns (right to left to maintain indices)
+        for col_idx in sorted(columns_needing_helpers.keys(), reverse=True):
+            max_files = columns_needing_helpers[col_idx]
+            header_name = ws.cell(1, col_idx).value
+
+            # Insert helper columns after this column
+            for helper_idx in range(max_files - 1):
+                ws.insert_cols(col_idx + 1)
+                helper_col = col_idx + 1 + helper_idx
+                ws.cell(1, helper_col).value = f"{header_name}_Link{helper_idx + 2}"
+                ws.column_dimensions[get_column_letter(helper_col)].hidden = True
+
+        # Second pass: process hyperlinks and populate helper columns
+        for col_idx in range(1, ws.max_column + 1):
+            for row_idx in range(2, ws.max_row + 1):
                 cell = ws.cell(row_idx, col_idx)
                 cell_value = str(cell.value or '')
 
                 if '|||' in cell_value:
-                    value, link = cell_value.split('|||', 1)
-                    if link and link.startswith('http'):
-                        cell.value = value
-                        cell.hyperlink = link
-                        cell.font = link_font
+                    # Check if this has multiple pipe-separated entries
+                    if ' | ' in cell_value:
+                        # Multiple files: "file1.pdf|||link1 | file2.pdf|||link2"
+                        parts = cell_value.split(' | ')
+                        display_parts = []
+                        links = []
+
+                        for part in parts:
+                            if '|||' in part:
+                                value, link = part.split('|||', 1)
+                                display_parts.append(value)
+                                if link and link.startswith('http'):
+                                    links.append(link)
+
+                        # Main cell: show all filenames, link to first
+                        cell.value = ' | '.join(display_parts)
+                        if links:
+                            cell.hyperlink = links[0]
+                            cell.font = link_font
+
+                        # Populate helper columns with additional links
+                        for helper_idx, link in enumerate(links[1:], start=1):
+                            helper_cell = ws.cell(row_idx, col_idx + helper_idx)
+                            helper_cell.value = display_parts[helper_idx] if helper_idx < len(display_parts) else ''
+                            helper_cell.hyperlink = link
+                            helper_cell.font = link_font
+                    else:
+                        # Single file: "file.pdf|||link"
+                        value, link = cell_value.split('|||', 1)
+                        if link and link.startswith('http'):
+                            cell.value = value
+                            cell.hyperlink = link
+                            cell.font = link_font
 
     def _auto_adjust_columns(self, ws, sample_size=100):
         """Auto-adjust column widths based on content."""
