@@ -37,6 +37,11 @@ class ReportGenerator:
 
     def _create_sharepoint_link(self, source: str, filename: str) -> str:
         """Create SharePoint link for a document."""
+        # Ensure filename has .pdf extension
+        if pd.notna(filename):
+            if not filename.endswith('.pdf'):
+                # Strip existing extension if any and add .pdf
+                filename = filename.rsplit('.', 1)[0] + '.pdf'
         return f"{self.sharepoint_base_url}{source}/{filename}"
 
     def _validate_participant_df(self, df: pd.DataFrame, context: str) -> pd.DataFrame:
@@ -127,53 +132,52 @@ class ReportGenerator:
 
         comparison_rows = []
         for (participant_id, element), group in df_with_id.groupby(['participant_id', 'element']):
-            # Collect values and links per source
-            source_data = {}  # {source: {'values': [...], 'filename': str}}
+            # Collect all files and their values for this participant/element
+            file_data = []  # List of {'filename': str, 'source': str, 'value': str, 'link': str}
 
             for _, row in group.iterrows():
                 source = row['source']
+                filename = row.get('_original_filename', row['filename'])
                 value = row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value')
+                link = self._create_sharepoint_link(source, filename)
 
-                if source not in source_data:
-                    source_data[source] = {
-                        'values': [],
-                        'filename': row.get('_original_filename', row['filename'])
-                    }
+                # Add each file individually
+                file_data.append({
+                    'filename': filename,
+                    'source': source,
+                    'value': str(value) if pd.notna(value) else None,
+                    'link': link
+                })
 
-                if pd.notna(value) and str(value) not in source_data[source]['values']:
-                    source_data[source]['values'].append(str(value))
-
-            # Build values and sources strings
-            values_list = []
-            sources_list = []
-
-            for source in sorted(source_data.keys()):
-                if source_data[source]['values']:
-                    value_str = ' | '.join(source_data[source]['values'])
-                    values_list.append(value_str)
-
-                    # Create hyperlinked source
-                    filename = source_data[source]['filename']
-                    link = self._create_sharepoint_link(source, filename)
-                    sources_list.append(f"{source}|||{link}")
-
-            values_display = ' | '.join(values_list) if values_list else ''
-            sources_display = ' | '.join(sources_list) if sources_list else ''
-
-            # Determine status
-            all_values = [v for sd in source_data.values() for v in sd['values']]
+            # Get all unique values
+            all_values = [f['value'] for f in file_data if f['value'] is not None]
             unique_values = list(set(all_values))
 
+            # Determine status
             if len(unique_values) == 0:
                 status = 'MISSING'
             elif len(unique_values) == 1:
-                # Check if multiple sources agree or just one source
-                if len(source_data) > 1:
+                # Check if multiple files agree or just one file
+                files_with_values = [f for f in file_data if f['value'] is not None]
+                if len(files_with_values) > 1:
                     status = 'MATCH'
                 else:
                     status = 'UNIQUE'
             else:
                 status = 'CONFLICT'
+
+            # Build values display (unique values separated by pipes)
+            values_display = ' | '.join(unique_values) if unique_values else ''
+
+            # Build sources display - show ALL files with hyperlinks
+            if status == 'MISSING':
+                # For missing, show all files checked (even though they have no values)
+                sources_list = [f"{f['filename']}|||{f['link']}" for f in file_data]
+            else:
+                # For non-missing, show only files that have values
+                sources_list = [f"{f['filename']}|||{f['link']}" for f in file_data if f['value'] is not None]
+
+            sources_display = ' | '.join(sources_list) if sources_list else ''
 
             comparison_rows.append({
                 'Participant ID': participant_id,
@@ -182,7 +186,7 @@ class ReportGenerator:
                 'Values': values_display,
                 'Sources': sources_display,
                 'Unique Values': len(unique_values),
-                'Sources Checked': len(source_data)
+                'Sources Checked': len(file_data)
             })
 
         comparison_df = pd.DataFrame(comparison_rows)
