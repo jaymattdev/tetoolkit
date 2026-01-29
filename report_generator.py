@@ -127,61 +127,69 @@ class ReportGenerator:
 
         comparison_rows = []
         for (participant_id, element), group in df_with_id.groupby(['participant_id', 'element']):
-            values_by_source = {}
+            # Collect values and links per source
+            source_data = {}  # {source: {'values': [...], 'filename': str}}
+
             for _, row in group.iterrows():
                 source = row['source']
                 value = row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value')
-                if source not in values_by_source:
-                    values_by_source[source] = []
-                if pd.notna(value):
-                    values_by_source[source].append(str(value))
+
+                if source not in source_data:
+                    source_data[source] = {
+                        'values': [],
+                        'filename': row.get('_original_filename', row['filename'])
+                    }
+
+                if pd.notna(value) and str(value) not in source_data[source]['values']:
+                    source_data[source]['values'].append(str(value))
+
+            # Build values and sources strings
+            values_list = []
+            sources_list = []
+
+            for source in sorted(source_data.keys()):
+                if source_data[source]['values']:
+                    value_str = ' | '.join(source_data[source]['values'])
+                    values_list.append(value_str)
+
+                    # Create hyperlinked source
+                    filename = source_data[source]['filename']
+                    link = self._create_sharepoint_link(source, filename)
+                    sources_list.append(f"{source}|||{link}")
+
+            values_display = ' | '.join(values_list) if values_list else ''
+            sources_display = ' | '.join(sources_list) if sources_list else ''
 
             # Determine status
-            all_values = [v for vals in values_by_source.values() for v in vals]
+            all_values = [v for sd in source_data.values() for v in sd['values']]
             unique_values = list(set(all_values))
 
             if len(unique_values) == 0:
-                status = 'Missing'
+                status = 'MISSING'
             elif len(unique_values) == 1:
-                status = 'Match'
-            else:
-                sources_with_conflicts = sum(1 for vals in values_by_source.values() if len(set(vals)) > 1)
-                if sources_with_conflicts > 0:
-                    status = 'Conflict (Within + Cross)'
+                # Check if multiple sources agree or just one source
+                if len(source_data) > 1:
+                    status = 'MATCH'
                 else:
-                    status = 'Conflict (Cross Source)'
-
-            # Build compact values string
-            sources_with_values = [
-                f"{source}: {' | '.join(vals)}"
-                for source, vals in sorted(values_by_source.items())
-                if vals
-            ]
-            compact_values = " || ".join(sources_with_values) if sources_with_values else "No values"
-
-            # Get document links
-            doc_links = [
-                self._create_sharepoint_link(row['source'], row.get('_original_filename', row['filename']))
-                for _, row in group.iterrows()
-            ]
-            doc_links_str = ' | '.join(set(doc_links[:5]))
+                    status = 'UNIQUE'
+            else:
+                status = 'CONFLICT'
 
             comparison_rows.append({
                 'Participant ID': participant_id,
                 'Element': element,
                 'Status': status,
-                'Values': compact_values,
-                'Sources Checked': len(values_by_source),
+                'Values': values_display,
+                'Sources': sources_display,
                 'Unique Values': len(unique_values),
-                'Documents': doc_links_str,
-                'Action': 'REVIEW' if status.startswith("Conflict") else ('MISSING' if status == 'Missing' else 'OK')
+                'Sources Checked': len(source_data)
             })
 
         comparison_df = pd.DataFrame(comparison_rows)
 
-        # Sort by action priority
-        action_order = {'REVIEW': 0, 'MISSING': 1, 'OK': 2}
-        comparison_df['_sort'] = comparison_df['Action'].map(action_order)
+        # Sort by status priority
+        status_order = {'CONFLICT': 0, 'MISSING': 1, 'UNIQUE': 2, 'MATCH': 3}
+        comparison_df['_sort'] = comparison_df['Status'].map(status_order)
         comparison_df = comparison_df.sort_values(['_sort', 'Participant ID', 'Element']).drop('_sort', axis=1)
 
         logger.info(f"Value Comparison tab ready with {len(comparison_df)} comparisons")
@@ -214,29 +222,12 @@ class ReportGenerator:
             non_missing = quality_counts['Good'] + quality_counts['Review'] + quality_counts['Conflict']
             quality_pct = (quality_counts['Good'] / non_missing * 100) if non_missing > 0 else 0
 
-            # Determine status and action
-            if quality_counts['Conflict'] > 0:
-                status, priority = 'Conflicts', 'High'
-                action = f"Resolve {quality_counts['Conflict']} conflicts: {', '.join(issue_elements['Conflict'][:3])}"
-                action += "..." if len(issue_elements['Conflict']) > 3 else ""
-            elif quality_counts['Review'] > 0:
-                status = 'Review'
-                priority = 'Medium' if quality_counts['Review'] > 5 else 'Low'
-                action = f"Review {quality_counts['Review']} items: {', '.join(issue_elements['Review'][:3])}"
-                action += "..." if len(issue_elements['Review']) > 3 else ""
-            elif quality_counts['Missing'] > 0:
-                status = 'Incomplete'
-                priority = 'Medium' if quality_counts['Missing'] > 10 else 'Low'
-                action = f"Fill {quality_counts['Missing']} missing: {', '.join(issue_elements['Missing'][:3])}"
-                action += "..." if len(issue_elements['Missing']) > 3 else ""
-            else:
-                status, priority, action = 'Complete', 'None', 'Database Ready ✓'
+            # Format missing and conflicting elements
+            missing_str = ', '.join(issue_elements['Missing']) if issue_elements['Missing'] else ''
+            conflict_str = ', '.join(issue_elements['Conflict']) if issue_elements['Conflict'] else ''
 
             summary_rows.append({
                 'Participant ID': participant_id,
-                'View Details': '#Master_View!A1',  # Updated with VBA later
-                'Status': status,
-                'Priority': priority,
                 'Completeness %': round(completeness_pct, 1),
                 'Quality %': round(quality_pct, 1),
                 'Good': quality_counts['Good'],
@@ -245,128 +236,17 @@ class ReportGenerator:
                 'Missing': quality_counts['Missing'],
                 'Total': total_elements,
                 'Sources': len(participant_group['source'].unique()),
-                'Action Required': action
+                'Missing Elements': missing_str,
+                'Conflicting Elements': conflict_str
             })
 
         summary_df = pd.DataFrame(summary_rows)
 
-        # Sort by priority
-        summary_df['_sort'] = summary_df['Priority'].map(PRIORITY_ORDER)
-        summary_df = summary_df.sort_values(['_sort', 'Completeness %']).drop('_sort', axis=1)
+        # Sort by conflicts (high to low), then completeness (low to high)
+        summary_df = summary_df.sort_values(['Conflicts', 'Completeness %'], ascending=[False, True])
 
         logger.info(f"Participant Summary ready with {len(summary_df)} participants")
         return summary_df
-
-    def create_participant_master_view(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create participant master view with one row per element per participant."""
-        df_with_id = self._validate_participant_df(df, "participant master view")
-        if df_with_id.empty:
-            return pd.DataFrame()
-
-        logger.info("Creating Participant Master View")
-
-        all_elements = sorted(df_with_id['element'].unique())
-        all_participants = sorted(df_with_id['participant_id'].unique())
-        all_sources = sorted(df_with_id['source'].unique())
-
-        master_rows = []
-
-        for participant_id in all_participants:
-            participant_data = df_with_id[df_with_id['participant_id'] == participant_id]
-
-            for element in all_elements:
-                element_data = participant_data[participant_data['element'] == element]
-
-                # Build source-specific values and links
-                source_data = {}
-                sources_checked = set()
-
-                for _, row in element_data.iterrows():
-                    source = row['source']
-                    sources_checked.add(source)
-
-                    if source not in source_data:
-                        value = row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value')
-                        if pd.notna(value):
-                            filename = row.get('_original_filename', row['filename'])
-                            link = self._create_sharepoint_link(source, filename)
-                            source_data[source] = f"{value}|||{link}"
-
-                # Get quality and best value
-                quality, best_value, unique_values = self._get_element_quality(element_data)
-
-                # Build row
-                row_data = {
-                    'Participant ID': participant_id,
-                    'Element': element,
-                    'Best Value': best_value,
-                    'Quality': quality,
-                    'Unique Values': len(unique_values)
-                }
-
-                # Add source columns
-                for source in all_sources:
-                    if source in source_data:
-                        row_data[source] = source_data[source]
-                    elif source in sources_checked:
-                        row_data[source] = '-'
-                    else:
-                        row_data[source] = ''
-
-                master_rows.append(row_data)
-
-        master_df = pd.DataFrame(master_rows)
-        master_df = self._sort_by_quality(master_df, 'Participant ID', 'Element')
-
-        logger.info(f"Participant Master View ready with {len(master_df)} rows")
-        return master_df
-
-    def create_review_needed_tab(self, df: pd.DataFrame, comparison_df: pd.DataFrame) -> pd.DataFrame:
-        """Create review needed tab combining low confidence and conflicts."""
-        logger.info("Creating Review Needed tab")
-        review_rows = []
-
-        # Low Confidence Extractions
-        if 'confidence' in df.columns:
-            low_conf = df[df['confidence'] == 'LOW']
-            for _, row in low_conf.iterrows():
-                review_rows.append({
-                    'Participant ID': row.get('participant_id', 'N/A'),
-                    'Source': row['source'],
-                    'Element': row['element'],
-                    'Value': row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value'),
-                    'Issue Type': 'Low Confidence',
-                    'Details': row.get('flag_reasons', ''),
-                    'Priority': 'Medium',
-                    'Document Link': self._create_sharepoint_link(row['source'], row['filename'])
-                })
-
-        # Conflicts
-        if not comparison_df.empty:
-            conflicts = comparison_df[comparison_df['Status'].str.contains('Conflict', na=False)]
-            for _, row in conflicts.iterrows():
-                review_rows.append({
-                    'Participant ID': row['Participant ID'],
-                    'Source': 'Multiple',
-                    'Element': row['Element'],
-                    'Value': row['Values'],
-                    'Issue Type': row['Status'],
-                    'Details': f"{row['Unique Values']} different values found",
-                    'Priority': 'High',
-                    'Document Link': ''
-                })
-
-        if not review_rows:
-            return pd.DataFrame(columns=['Participant ID', 'Source', 'Element', 'Value', 'Issue Type', 'Details', 'Priority', 'Document Link'])
-
-        review_df = pd.DataFrame(review_rows)
-        priority_order_map = {'High': 0, 'Medium': 1, 'Low': 2}
-        review_df['_sort'] = review_df['Priority'].map(priority_order_map)
-        review_df = review_df.sort_values(['_sort', 'Participant ID']).drop('_sort', axis=1)
-
-        logger.info(f"Review Needed tab ready with {len(review_df)} items")
-        return review_df
-
     def create_source_statistics_tab(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create source-level statistics."""
         if df.empty:
@@ -399,8 +279,7 @@ class ReportGenerator:
                 'Low Conf %': round(low_pct, 1),
                 'Missing Data': missing,
                 'Missing %': round(missing_pct, 1),
-                'Top Problem Elements': problem_elements,
-                'Needs Review': "YES" if high_pct < 70 else "NO"
+                'Top Problem Elements': problem_elements
             })
 
         stats_df = pd.DataFrame(stats_rows).sort_values('High Conf %', ascending=True)
@@ -437,8 +316,7 @@ class ReportGenerator:
                 'Elements Extracted': elements_extracted,
                 'Total Elements': total_elements,
                 'Completeness %': round(completeness, 1),
-                'Conflicts': conflicts,
-                'Needs Review': "YES" if conflicts > 0 or completeness < 80 else "NO"
+                'Conflicts': conflicts
             })
 
         stats_df = pd.DataFrame(stats_rows).sort_values('Completeness %', ascending=False)
@@ -530,12 +408,11 @@ class ReportGenerator:
             self._apply_conditional_formatting_rule(ws, col_map['confidence'], 'LOW', fills['red'])
 
         if 'status' in col_map:
-            for val in ['Match', 'Complete']:
-                self._apply_conditional_formatting_rule(ws, col_map['status'], val, fills['good'])
-            for val in ['Missing']:
-                self._apply_conditional_formatting_rule(ws, col_map['status'], val, fills['red'])
-            for val in ['Incomplete', 'Conflicts', 'Review', 'Conflict (Within Source)', 'Conflict (Cross Source)', 'Conflict (Within + Cross)']:
-                self._apply_conditional_formatting_rule(ws, col_map['status'], val, fills['yellow'])
+            # New status values
+            self._apply_conditional_formatting_rule(ws, col_map['status'], 'MATCH', fills['good'])
+            self._apply_conditional_formatting_rule(ws, col_map['status'], 'UNIQUE', fills['good'])
+            self._apply_conditional_formatting_rule(ws, col_map['status'], 'MISSING', fills['red'])
+            self._apply_conditional_formatting_rule(ws, col_map['status'], 'CONFLICT', fills['yellow'])
 
         if 'quality' in col_map:
             self._apply_conditional_formatting_rule(ws, col_map['quality'], 'Good', fills['good'])
@@ -604,141 +481,8 @@ class ReportGenerator:
             ws.column_dimensions[col_letter].width = min(max_length + 2, 50)
 
     # ====================
-    # VBA LINKS
+    # PARTICIPANT LINKS
     # ====================
-
-    def add_participant_links(self, filepath: str, master_view_df: pd.DataFrame):
-        """Add VBA-powered or simple hyperlinks for participant filtering."""
-        try:
-            import xlwings as xw
-            self._add_links_with_xlwings(filepath, master_view_df)
-        except ImportError:
-            logger.warning("xlwings not installed - using simple hyperlinks")
-            self._add_links_without_xlwings(filepath, master_view_df)
-
-    def _add_links_with_xlwings(self, filepath: str, master_view_df: pd.DataFrame):
-        """Add VBA macros for auto-filtering (requires xlwings)."""
-        import xlwings as xw
-
-        app = xw.App(visible=False)
-        wb = app.books.open(filepath)
-
-        try:
-            # Add VBA macro
-            vba_code = '''
-Sub FilterParticipant(participantID As Variant)
-    Dim ws As Worksheet
-    Set ws = ThisWorkbook.Sheets("Participant Master View")
-    ws.Activate
-    On Error Resume Next
-    ws.AutoFilterMode = False
-    On Error GoTo 0
-    ws.Range("A1").AutoFilter
-    ws.Range("A1").AutoFilter Field:=1, Criteria1:=CStr(participantID)
-    ws.Range("A2").Select
-    ActiveWindow.ScrollRow = 1
-End Sub
-'''
-            try:
-                vb_module = wb.api.VBProject.VBComponents.Add(1)
-                vb_module.CodeModule.AddFromString(vba_code)
-                logger.info("VBA module added")
-            except:
-                logger.warning("Could not add VBA (enable 'Trust access to VBA')")
-
-            # Add links
-            summary_ws = wb.sheets['Participant Summary']
-            header_row = summary_ws.range('1:1').value
-
-            view_col = header_row.index('View Details') + 1
-            id_col = header_row.index('Participant ID') + 1
-
-            for row_idx in range(2, summary_ws.range('A1').current_region.last_cell.row + 1):
-                pid = summary_ws.range(f'{chr(64 + id_col)}{row_idx}').value
-                if pid:
-                    cell = summary_ws.range(f'{chr(64 + view_col)}{row_idx}')
-                    cell.value = "View Details"
-                    cell.color = (5, 99, 193)
-                    cell.api.Font.Underline = True
-                    cell.note = f"Click to filter to Participant {pid}"
-
-            wb.save()
-            logger.info("VBA links added")
-        finally:
-            wb.close()
-            app.quit()
-
-    def _add_links_without_xlwings(self, filepath: str, master_view_df: pd.DataFrame):
-        """Add simple hyperlinks without VBA (fallback)."""
-        wb = load_workbook(filepath)
-
-        if 'Participant Summary' not in wb.sheetnames or 'Participant Master View' not in wb.sheetnames:
-            return
-
-        summary_ws = wb['Participant Summary']
-        header_row = [cell.value for cell in summary_ws[1]]
-
-        try:
-            view_col = header_row.index('View Details') + 1
-            id_col = header_row.index('Participant ID') + 1
-        except ValueError:
-            return
-
-        # Map participants to first row
-        participant_rows = {}
-        if not master_view_df.empty:
-            for idx, row in master_view_df.iterrows():
-                pid = row['Participant ID']
-                if pid not in participant_rows:
-                    participant_rows[pid] = idx + 2
-
-        # Add hyperlinks
-        for row_idx in range(2, summary_ws.max_row + 1):
-            pid = summary_ws.cell(row_idx, id_col).value
-            if pid in participant_rows:
-                cell = summary_ws.cell(row_idx, view_col)
-                cell.hyperlink = f"#'Participant Master View'!A{participant_rows[pid]}"
-                cell.value = "View Details (manual filter)"
-                cell.font = Font(color="0563C1", underline="single")
-
-        wb.save(filepath)
-        logger.info(f"Added {len(participant_rows)} simple hyperlinks")
-
-    # ====================
-    # INSTRUCTIONS
-    # ====================
-
-    def _create_instructions(self, plan_name: str) -> pd.DataFrame:
-        """Create instructions sheet."""
-        instructions = [
-            ['Interactive Extraction Report', f'Plan: {plan_name}'],
-            ['', ''],
-            ['WORKFLOW:', ''],
-            ['1. Participant Summary', 'Start here - overview of all participants'],
-            ['2. Click View Details', 'Jump to Master View filtered (with xlwings) or manually filter'],
-            ['3. Review elements', 'Check Quality column - Green=Good, Yellow=Review, Red=Conflict'],
-            ['4. Click values', 'Values are hyperlinked to source documents'],
-            ['5. Resolve conflicts', 'Compare sources and determine correct value'],
-            ['', ''],
-            ['QUALITY INDICATORS:', ''],
-            ['• Good (Green)', 'Single value, high confidence - DATABASE READY'],
-            ['• Review (Yellow)', 'Single value but needs verification'],
-            ['• Conflict (Red)', 'Multiple different values - MUST RESOLVE'],
-            ['• Missing (Light Red)', 'No value extracted'],
-            ['', ''],
-            ['SOURCE COLUMNS:', ''],
-            ['• Value with hyperlink', 'Has data - click to open document'],
-            ['• "-"', 'Expected but missing (source was checked)'],
-            ['• Blank', 'Not expected (source not relevant for this element)'],
-            ['', ''],
-            ['TIPS:', ''],
-            ['• Filter by Quality = "Conflict"', 'Focus on critical items first'],
-            ['• Filter by Participant ID', 'Review one participant at a time'],
-            ['', ''],
-            ['SharePoint Base URL:', self.sharepoint_base_url],
-        ]
-        return pd.DataFrame(instructions, columns=['Topic', 'Description'])
-
     # ====================
     # MAIN REPORT GENERATION
     # ====================
@@ -747,38 +491,30 @@ End Sub
         """Generate comprehensive interactive Excel report."""
         logger.info(f"Generating interactive report for {plan_name}")
 
-        # Generate all tabs
-        all_data = self.create_all_data_tab(validated_df)
-        comparison = self.create_value_comparison_tab(validated_df)
+        # Generate tabs
         participant_summary = self.create_participant_summary(validated_df)
-        master_view = self.create_participant_master_view(validated_df)
-        review_needed = self.create_review_needed_tab(validated_df, comparison)
+        comparison = self.create_value_comparison_tab(validated_df)
+        all_data = self.create_all_data_tab(validated_df)
         source_stats = self.create_source_statistics_tab(validated_df)
         participant_stats = self.create_participant_statistics_tab(validated_df, comparison)
-        instructions = self._create_instructions(plan_name)
 
         # Write to Excel
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             tabs = [
                 (participant_summary, 'Participant Summary'),
-                (master_view, 'Participant Master View'),
-                (all_data, 'All Extracted Data'),
                 (comparison, 'Value Comparison'),
-                (review_needed, 'Review Needed'),
+                (all_data, 'All Extracted Data'),
                 (source_stats, 'Source Statistics'),
-                (participant_stats, 'Participant Statistics'),
-                (instructions, 'Instructions')
+                (participant_stats, 'Participant Statistics')
             ]
 
             for df, sheet_name in tabs:
-                if not df.empty or sheet_name == 'Instructions':
+                if not df.empty:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     logger.info(f"Added {sheet_name}: {len(df)} rows")
 
-        # Apply formatting and links
+        # Apply formatting
         self.apply_excel_formatting(output_path)
-        if not participant_summary.empty and not master_view.empty:
-            self.add_participant_links(output_path, master_view)
 
         logger.info(f"Interactive report generated: {output_path}")
         return output_path
