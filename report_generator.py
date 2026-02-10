@@ -119,86 +119,18 @@ class ReportGenerator:
         optional_cols = ['confidence', 'extraction_order', 'extraction_position', 'flags', 'flag_reasons']
         columns = [c for c in base_cols + optional_cols if c in report_df.columns] + ['Document Link']
 
-        return report_df[columns]
+        report_df = report_df[columns]
 
-    def create_value_comparison_tab(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create element-by-element comparison across sources."""
-        if df.empty:
-            return pd.DataFrame()
+        # Sort by participant_id and source for easier reading
+        sort_cols = []
+        if 'participant_id' in report_df.columns:
+            sort_cols.append('participant_id')
+        if 'source' in report_df.columns:
+            sort_cols.append('source')
+        if sort_cols:
+            report_df = report_df.sort_values(sort_cols)
 
-        logger.info("Creating Value Comparison tab")
-        df_with_id = self._validate_participant_df(df, "value comparison")
-        if df_with_id.empty:
-            return pd.DataFrame()
-
-        comparison_rows = []
-        for (participant_id, element), group in df_with_id.groupby(['participant_id', 'element']):
-            # Collect all files and their values for this participant/element
-            file_data = []  # List of {'filename': str, 'source': str, 'value': str, 'link': str}
-
-            for _, row in group.iterrows():
-                source = row['source']
-                filename = row.get('_original_filename', row['filename'])
-                value = row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value')
-                link = self._create_sharepoint_link(source, filename)
-
-                # Add each file individually
-                file_data.append({
-                    'filename': filename,
-                    'source': source,
-                    'value': str(value) if pd.notna(value) else None,
-                    'link': link
-                })
-
-            # Get all unique values
-            all_values = [f['value'] for f in file_data if f['value'] is not None]
-            unique_values = list(set(all_values))
-
-            # Determine status
-            if len(unique_values) == 0:
-                status = 'MISSING'
-            elif len(unique_values) == 1:
-                # Check if multiple files agree or just one file
-                files_with_values = [f for f in file_data if f['value'] is not None]
-                if len(files_with_values) > 1:
-                    status = 'MATCH'
-                else:
-                    status = 'UNIQUE'
-            else:
-                status = 'CONFLICT'
-
-            # Build values display (unique values separated by pipes)
-            values_display = ' | '.join(unique_values) if unique_values else ''
-
-            # Build sources display - show ALL files with hyperlinks
-            if status == 'MISSING':
-                # For missing, show all files checked (even though they have no values)
-                sources_list = [f"{f['filename']}|||{f['link']}" for f in file_data]
-            else:
-                # For non-missing, show only files that have values
-                sources_list = [f"{f['filename']}|||{f['link']}" for f in file_data if f['value'] is not None]
-
-            sources_display = ' | '.join(sources_list) if sources_list else ''
-
-            comparison_rows.append({
-                'Participant ID': participant_id,
-                'Element': element,
-                'Status': status,
-                'Values': values_display,
-                'Sources': sources_display,
-                'Unique Values': len(unique_values),
-                'Sources Checked': len(file_data)
-            })
-
-        comparison_df = pd.DataFrame(comparison_rows)
-
-        # Sort by status priority
-        status_order = {'CONFLICT': 0, 'MISSING': 1, 'UNIQUE': 2, 'MATCH': 3}
-        comparison_df['_sort'] = comparison_df['Status'].map(status_order)
-        comparison_df = comparison_df.sort_values(['_sort', 'Participant ID', 'Element']).drop('_sort', axis=1)
-
-        logger.info(f"Value Comparison tab ready with {len(comparison_df)} comparisons")
-        return comparison_df
+        return report_df
 
     def create_participant_summary(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create compact participant summary for large datasets."""
@@ -213,21 +145,21 @@ class ReportGenerator:
 
         for participant_id, participant_group in df_with_id.groupby('participant_id'):
             quality_counts = {'Good': 0, 'Review': 0, 'Conflict': 0, 'Missing': 0}
-            issue_elements = {'Conflict': [], 'Review': [], 'Missing': []}
+            issue_elements = {'Good': [], 'Conflict': [], 'Review': [], 'Missing': []}
 
             for element in all_elements:
                 element_data = participant_group[participant_group['element'] == element]
                 quality, _, _ = self._get_element_quality(element_data)
                 quality_counts[quality] += 1
-                if quality != 'Good':
-                    issue_elements[quality].append(element)
+                issue_elements[quality].append(element)
 
             # Calculate metrics
             completeness_pct = (quality_counts['Good'] / total_elements * 100) if total_elements > 0 else 0
             non_missing = quality_counts['Good'] + quality_counts['Review'] + quality_counts['Conflict']
             quality_pct = (quality_counts['Good'] / non_missing * 100) if non_missing > 0 else 0
 
-            # Format missing and conflicting elements
+            # Format element lists
+            complete_str = ', '.join(issue_elements['Good']) if issue_elements['Good'] else ''
             missing_str = ', '.join(issue_elements['Missing']) if issue_elements['Missing'] else ''
             conflict_str = ', '.join(issue_elements['Conflict']) if issue_elements['Conflict'] else ''
 
@@ -241,6 +173,7 @@ class ReportGenerator:
                 'Missing': quality_counts['Missing'],
                 'Total': total_elements,
                 'Sources': len(participant_group['source'].unique()),
+                'Complete Elements': complete_str,
                 'Missing Elements': missing_str,
                 'Conflicting Elements': conflict_str
             })
@@ -291,7 +224,7 @@ class ReportGenerator:
         logger.info(f"Source Statistics tab ready with {len(stats_df)} sources")
         return stats_df
 
-    def create_participant_statistics_tab(self, df: pd.DataFrame, comparison_df: pd.DataFrame) -> pd.DataFrame:
+    def create_participant_statistics_tab(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create participant-level statistics."""
         df_with_id = self._validate_participant_df(df, "participant statistics")
         if df_with_id.empty:
@@ -300,21 +233,21 @@ class ReportGenerator:
         logger.info("Creating Participant Statistics tab")
 
         # Count total elements
-        total_elements = len(df_with_id['element'].unique())
+        all_elements = df_with_id['element'].unique()
+        total_elements = len(all_elements)
         stats_rows = []
 
         for participant_id, group in df_with_id.groupby('participant_id'):
             elements_extracted = group['element'].nunique()
             completeness = (elements_extracted / total_elements * 100) if total_elements > 0 else 0
 
-            # Count conflicts from comparison
+            # Count conflicts by checking each element for multiple unique values
             conflicts = 0
-            if not comparison_df.empty:
-                participant_conflicts = comparison_df[
-                    (comparison_df['Participant ID'] == participant_id) &
-                    (comparison_df['Status'].str.contains('Conflict', na=False))
-                ]
-                conflicts = len(participant_conflicts)
+            for element in all_elements:
+                element_data = group[group['element'] == element]
+                quality, _, _ = self._get_element_quality(element_data)
+                if quality == 'Conflict':
+                    conflicts += 1
 
             stats_rows.append({
                 'Participant ID': participant_id,
@@ -341,6 +274,45 @@ class ReportGenerator:
             ws.conditional_formatting.add(f'{col_letter}2:{col_letter}{ws.max_row}', rule)
         except Exception as e:
             logger.warning(f"Could not apply conditional formatting for {value} in {col_letter}: {e}")
+
+    def _apply_participant_color_banding(self, ws, headers):
+        """Apply alternating grey/white color banding by participant ID."""
+        # Find participant_id column
+        pid_col = None
+        for header, idx in headers.items():
+            if header == 'participant_id':
+                pid_col = idx
+                break
+
+        if not pid_col:
+            logger.warning("No participant_id column found for color banding")
+            return
+
+        # Define alternating fills
+        grey_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+
+        # Track participant changes and apply banding
+        current_participant = None
+        use_grey = False
+
+        for row_idx in range(2, ws.max_row + 1):
+            participant = ws.cell(row_idx, pid_col).value
+
+            # Check if participant changed
+            if participant != current_participant:
+                current_participant = participant
+                use_grey = not use_grey  # Toggle color
+
+            # Apply fill to entire row
+            fill = grey_fill if use_grey else white_fill
+            for col_idx in range(1, ws.max_column + 1):
+                cell = ws.cell(row_idx, col_idx)
+                # Only apply if cell doesn't already have special formatting
+                if cell.fill.start_color.rgb in ('00000000', None, 'FFFFFF', 'F2F2F2'):
+                    cell.fill = fill
+
+        logger.info(f"Applied participant color banding to {ws.max_row - 1} rows")
 
     def apply_excel_formatting(self, filepath: str):
         """Apply comprehensive Excel formatting to all tabs."""
@@ -386,6 +358,10 @@ class ReportGenerator:
 
                 # Apply conditional formatting
                 self._apply_formatting_rules(ws, col_map)
+
+                # Apply color banding by participant for All Extracted Data tab
+                if ws.title == 'All Extracted Data':
+                    self._apply_participant_color_banding(ws, headers)
 
                 # Process hyperlinks
                 self._process_hyperlinks(ws, link_font)
@@ -555,16 +531,14 @@ class ReportGenerator:
 
         # Generate tabs
         participant_summary = self.create_participant_summary(validated_df)
-        comparison = self.create_value_comparison_tab(validated_df)
         all_data = self.create_all_data_tab(validated_df)
         source_stats = self.create_source_statistics_tab(validated_df)
-        participant_stats = self.create_participant_statistics_tab(validated_df, comparison)
+        participant_stats = self.create_participant_statistics_tab(validated_df)
 
         # Write to Excel
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             tabs = [
                 (participant_summary, 'Participant Summary'),
-                (comparison, 'Value Comparison'),
                 (all_data, 'All Extracted Data'),
                 (source_stats, 'Source Statistics'),
                 (participant_stats, 'Participant Statistics')
@@ -575,7 +549,7 @@ class ReportGenerator:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     logger.info(f"Added {sheet_name}: {len(df)} rows")
 
-        # Apply formatting
+        # Apply formatting (including color banding)
         self.apply_excel_formatting(output_path)
 
         logger.info(f"Interactive report generated: {output_path}")
