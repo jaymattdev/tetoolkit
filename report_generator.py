@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 QUALITY_ORDER = {'Conflict': 0, 'Review': 1, 'Missing': 2, 'Good': 3}
-PRIORITY_ORDER = {'High': 0, 'Medium': 1, 'Low': 2, 'None': 3}
 
 QUALITY_FILLS = {
     'good': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
@@ -116,7 +115,7 @@ class ReportGenerator:
 
         # Select columns dynamically
         base_cols = ['participant_id', 'source', 'filename', 'element', 'value', 'cleaned_value']
-        optional_cols = ['confidence', 'extraction_order', 'extraction_position', 'flags', 'flag_reasons']
+        optional_cols = ['extraction_order', 'extraction_position', 'flags', 'flag_reasons']
         columns = [c for c in base_cols + optional_cols if c in report_df.columns] + ['Document Link']
 
         report_df = report_df[columns]
@@ -194,14 +193,21 @@ class ReportGenerator:
         stats_rows = []
 
         for source, group in df.groupby('source'):
-            total = len(group)
-            high_conf = len(group[group.get('confidence', 'HIGH') == 'HIGH'])
-            low_conf = len(group[group.get('confidence', 'LOW') == 'LOW'])
+            # Count missing elements (no value extracted)
             missing = len(group[group['cleaned_value'].isna() & group['value'].isna()])
 
-            high_pct = (high_conf / total * 100) if total > 0 else 0
-            low_pct = (low_conf / total * 100) if total > 0 else 0
-            missing_pct = (missing / total * 100) if total > 0 else 0
+            # Count actual extractions (exclude missing - only count rows with values)
+            actual_extractions = len(group) - missing
+
+            # High/Low confidence only applies to actual extractions
+            high_conf = len(group[group.get('confidence', 'HIGH') == 'HIGH']) if 'confidence' in group.columns else actual_extractions
+            low_conf = len(group[group.get('confidence', 'LOW') == 'LOW']) if 'confidence' in group.columns else 0
+
+            # Calculate percentages based on total elements (actual + missing)
+            total_elements = len(group)
+            high_pct = (high_conf / total_elements * 100) if total_elements > 0 else 0
+            low_pct = (low_conf / total_elements * 100) if total_elements > 0 else 0
+            missing_pct = (missing / total_elements * 100) if total_elements > 0 else 0
 
             problem_elements = "None"
             if 'confidence' in group.columns:
@@ -210,7 +216,7 @@ class ReportGenerator:
 
             stats_rows.append({
                 'Source': source,
-                'Total Extractions': total,
+                'Total Extractions': actual_extractions,
                 'High Confidence': high_conf,
                 'High Conf %': round(high_pct, 1),
                 'Low Confidence': low_conf,
@@ -340,21 +346,10 @@ class ReportGenerator:
 
                 for header, idx in headers.items():
                     col_letter = ws.cell(1, idx).column_letter
-                    header_str = str(header) if header else ''
 
-                    # Map columns
-                    if header == 'Confidence':
-                        col_map['confidence'] = col_letter
-                    elif header == 'Status':
-                        col_map['status'] = col_letter
-                    elif header == 'Quality':
+                    # Map columns for conditional formatting
+                    if header == 'Quality':
                         col_map['quality'] = col_letter
-                    elif header in ('Action', 'Action Required'):
-                        col_map['action'] = col_letter
-                    elif header == 'Priority':
-                        col_map['priority'] = col_letter
-                    elif header == 'Needs Review':
-                        col_map['needs_review'] = col_letter
 
                 # Apply conditional formatting
                 self._apply_formatting_rules(ws, col_map)
@@ -381,36 +376,14 @@ class ReportGenerator:
             logger.error(f"Error applying formatting: {e}", exc_info=True)
 
     def _apply_formatting_rules(self, ws, col_map):
-        """Apply all conditional formatting rules."""
+        """Apply conditional formatting rules for Quality column."""
         fills = QUALITY_FILLS
-
-        if 'confidence' in col_map:
-            self._apply_conditional_formatting_rule(ws, col_map['confidence'], 'HIGH', fills['good'])
-            self._apply_conditional_formatting_rule(ws, col_map['confidence'], 'LOW', fills['red'])
-
-        if 'status' in col_map:
-            # New status values
-            self._apply_conditional_formatting_rule(ws, col_map['status'], 'MATCH', fills['good'])
-            self._apply_conditional_formatting_rule(ws, col_map['status'], 'UNIQUE', fills['good'])
-            self._apply_conditional_formatting_rule(ws, col_map['status'], 'MISSING', fills['red'])
-            self._apply_conditional_formatting_rule(ws, col_map['status'], 'CONFLICT', fills['yellow'])
 
         if 'quality' in col_map:
             self._apply_conditional_formatting_rule(ws, col_map['quality'], 'Good', fills['good'])
             self._apply_conditional_formatting_rule(ws, col_map['quality'], 'Review', fills['yellow'])
             self._apply_conditional_formatting_rule(ws, col_map['quality'], 'Conflict', fills['red'])
             self._apply_conditional_formatting_rule(ws, col_map['quality'], 'Missing', fills['light_red'])
-
-        if 'action' in col_map:
-            self._apply_conditional_formatting_rule(ws, col_map['action'], 'REVIEW', fills['yellow'], Font(bold=True))
-            self._apply_conditional_formatting_rule(ws, col_map['action'], 'MISSING', fills['red'])
-
-        if 'priority' in col_map:
-            self._apply_conditional_formatting_rule(ws, col_map['priority'], 'High', fills['red'], Font(bold=True, color="9C0006"))
-            self._apply_conditional_formatting_rule(ws, col_map['priority'], 'Medium', fills['yellow'])
-
-        if 'needs_review' in col_map:
-            self._apply_conditional_formatting_rule(ws, col_map['needs_review'], 'YES', fills['red'], Font(bold=True))
 
     def _process_hyperlinks(self, ws, link_font):
         """Process and convert hyperlinks, creating hidden columns for additional links."""
@@ -518,9 +491,6 @@ class ReportGenerator:
 
             ws.column_dimensions[col_letter].width = min(max_length + 2, 50)
 
-    # ====================
-    # PARTICIPANT LINKS
-    # ====================
     # ====================
     # MAIN REPORT GENERATION
     # ====================
