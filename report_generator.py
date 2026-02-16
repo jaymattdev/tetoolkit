@@ -27,9 +27,29 @@ QUALITY_FILLS = {
 class ReportGenerator:
     """Generate comprehensive interactive Excel reports for data review."""
 
-    def __init__(self, sharepoint_base_url: str = "https://yourcompany.sharepoint.com/sites/yoursite/"):
-        self.sharepoint_base_url = sharepoint_base_url
-        logger.info("Initialized ReportGenerator")
+    def __init__(self, sharepoint_base_url: str = None, hyperlink_style: str = None,
+                 output_link_extension: str = None):
+        """
+        Initialize the ReportGenerator.
+
+        Args:
+            sharepoint_base_url: Base URL for SharePoint links. If None, reads from master config.
+            hyperlink_style: Display style for hyperlinks:
+                            'short' - Shows "Open File" as clickable text
+                            'full'  - Shows the complete URL in the cell
+                            If None, reads from master config.
+            output_link_extension: File extension for document links (e.g., '.pdf').
+                                  If None, reads from master config.
+        """
+        # Load from master config if not provided
+        from config_loader import get_master_config
+        config = get_master_config()
+
+        self.sharepoint_base_url = sharepoint_base_url or config.sharepoint_base_url
+        self.hyperlink_style = hyperlink_style or config.hyperlink_style
+        self.output_link_extension = output_link_extension or config.output_link_extension
+
+        logger.info(f"Initialized ReportGenerator (hyperlink_style={self.hyperlink_style})")
 
     # ====================
     # HELPER METHODS
@@ -37,11 +57,11 @@ class ReportGenerator:
 
     def _create_sharepoint_link(self, source: str, filename: str) -> str:
         """Create SharePoint link for a document."""
-        # Ensure filename has .pdf extension
-        if pd.notna(filename):
-            if not filename.endswith('.pdf'):
-                # Strip existing extension if any and add .pdf
-                filename = filename.rsplit('.', 1)[0] + '.pdf'
+        if pd.notna(filename) and self.output_link_extension:
+            # Apply configured output extension
+            if not filename.endswith(self.output_link_extension):
+                # Strip existing extension if any and add configured extension
+                filename = filename.rsplit('.', 1)[0] + self.output_link_extension
         return f"{self.sharepoint_base_url}{source}/{filename}"
 
     def _validate_participant_df(self, df: pd.DataFrame, context: str) -> pd.DataFrame:
@@ -387,6 +407,8 @@ class ReportGenerator:
 
     def _process_hyperlinks(self, ws, link_font):
         """Process and convert hyperlinks, creating hidden columns for additional links."""
+        use_short_style = (self.hyperlink_style == 'short')
+
         # Process regular link columns
         header_row = [cell.value for cell in ws[1]]
         link_columns = [idx for idx, h in enumerate(header_row, 1) if 'Link' in str(h) or 'Documents' in str(h)]
@@ -400,10 +422,14 @@ class ReportGenerator:
                     if ' | ' in cell_value:
                         urls = cell_value.split(' | ')
                         cell.hyperlink = urls[0]
-                        cell.value = f"Open File ({len(urls)} docs)"
+                        if use_short_style:
+                            cell.value = f"Open File ({len(urls)} docs)"
+                        # else: keep full URL as cell value
                     else:
                         cell.hyperlink = cell_value
-                        cell.value = "Open File"
+                        if use_short_style:
+                            cell.value = "Open File"
+                        # else: keep full URL as cell value
                     cell.font = link_font
 
         # Track columns that need helper columns
@@ -456,8 +482,12 @@ class ReportGenerator:
                                 if link and link.startswith('http'):
                                     links.append(link)
 
-                        # Main cell: show all filenames, link to first
-                        cell.value = ' | '.join(display_parts)
+                        # Main cell: show filenames or short text based on style
+                        if use_short_style:
+                            cell.value = f"Open File ({len(display_parts)} docs)"
+                        else:
+                            cell.value = ' | '.join(display_parts)
+
                         if links:
                             cell.hyperlink = links[0]
                             cell.font = link_font
@@ -465,14 +495,20 @@ class ReportGenerator:
                         # Populate helper columns with additional links
                         for helper_idx, link in enumerate(links[1:], start=1):
                             helper_cell = ws.cell(row_idx, col_idx + helper_idx)
-                            helper_cell.value = display_parts[helper_idx] if helper_idx < len(display_parts) else ''
+                            if use_short_style:
+                                helper_cell.value = f"Open File {helper_idx + 1}"
+                            else:
+                                helper_cell.value = display_parts[helper_idx] if helper_idx < len(display_parts) else ''
                             helper_cell.hyperlink = link
                             helper_cell.font = link_font
                     else:
                         # Single file: "file.pdf|||link"
                         value, link = cell_value.split('|||', 1)
                         if link and link.startswith('http'):
-                            cell.value = value
+                            if use_short_style:
+                                cell.value = "Open File"
+                            else:
+                                cell.value = value
                             cell.hyperlink = link
                             cell.font = link_font
 

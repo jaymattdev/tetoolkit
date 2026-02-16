@@ -1,0 +1,70 @@
+# =============================================================================
+# MASTER CONFIGURATION - Text Extraction Tool
+# =============================================================================
+# This file contains global settings that apply to all extraction runs.
+# Copy this file and modify as needed for your environment.
+# =============================================================================
+
+[SharePoint]
+# Base URL for document links in reports
+# This should point to your SharePoint document library root
+# Example: "https://contoso.sharepoint.com/sites/HR/Documents/Extractions/"
+base_url = "https://yourcompany.sharepoint.com/sites/yoursite/"
+
+# Hyperlink display style in Excel reports:
+#   "full"      - Shows the complete URL in the cell (e.g., "https://sharepoint.com/doc.pdf")
+#   "short"     - Shows "Open File" as clickable text (cleaner look, smaller file size)
+hyperlink_style = "short"
+
+
+[Defaults]
+# Default pattern file to use if none specified
+patterns_file = "patterns_example.py"
+
+# Default log level: DEBUG, INFO, WARNING, ERROR
+log_level = "INFO"
+
+# Skip text cleaning by default (false = run cleaning)
+skip_cleaning = false
+
+# Skip report generation by default (false = generate report)
+skip_report = false
+
+
+[Cleaning]
+# Jaro-Winkler similarity threshold for spell-checking keywords (0.0 - 1.0)
+# Higher = more strict (fewer corrections), Lower = more lenient (more corrections)
+# Recommended range: 0.80 - 0.95
+spell_check_threshold = 0.85
+
+
+[Validation]
+# Z-score threshold for positional outlier detection
+# Higher = less strict (flags fewer outliers)
+# Recommended range: 2.5 - 4.0
+positional_outlier_threshold = 3.0
+
+# Maximum character gap between sequential elements in a document
+# Larger = more tolerant of gaps in document structure
+# Recommended range: 1500 - 3000
+within_document_gap_threshold = 2000
+
+
+[FileTypes]
+# Supported file extensions for extraction
+# Add extensions as needed (must include the dot)
+supported_extensions = [".txt"]
+
+# File extension for output document links (e.g., if originals are PDFs)
+# Set to "" to keep original extensions
+output_link_extension = ".pdf"
+
+
+[Output]
+# Include extraction metadata columns in output
+include_extraction_order = true
+include_extraction_position = false
+
+# Include flag columns in output
+include_flags = true
+include_flag_reasons = true
