@@ -16,19 +16,9 @@ base_url = "https://yourcompany.sharepoint.com/sites/yoursite/"
 #   "short"     - Shows "Open File" as clickable text (cleaner look, smaller file size)
 hyperlink_style = "short"
 
-
-[Defaults]
-# Default pattern file to use if none specified
-patterns_file = "patterns_example.py"
-
-# Default log level: DEBUG, INFO, WARNING, ERROR
-log_level = "INFO"
-
-# Skip text cleaning by default (false = run cleaning)
-skip_cleaning = false
-
-# Skip report generation by default (false = generate report)
-skip_report = false
+# File extension for output document links (e.g., if originals are PDFs)
+# Set to "" to keep original extensions
+output_link_extension = ".pdf"
 
 
 [Cleaning]
@@ -54,10 +44,6 @@ within_document_gap_threshold = 2000
 # Supported file extensions for extraction
 # Add extensions as needed (must include the dot)
 supported_extensions = [".txt"]
-
-# File extension for output document links (e.g., if originals are PDFs)
-# Set to "" to keep original extensions
-output_link_extension = ".pdf"
 
 
 [Output]

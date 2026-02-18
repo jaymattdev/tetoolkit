@@ -49,6 +49,12 @@ class ReportGenerator:
         self.hyperlink_style = hyperlink_style or config.hyperlink_style
         self.output_link_extension = output_link_extension or config.output_link_extension
 
+        # Output column settings from master config
+        self.include_extraction_order = config.include_extraction_order
+        self.include_extraction_position = config.include_extraction_position
+        self.include_flags = config.include_flags
+        self.include_flag_reasons = config.include_flag_reasons
+
         logger.info(f"Initialized ReportGenerator (hyperlink_style={self.hyperlink_style})")
 
     # ====================
@@ -133,9 +139,20 @@ class ReportGenerator:
         logger.info(f"Creating All Extracted Data tab with {len(df)} rows")
         report_df = self._prepare_filename_and_link(df.copy())
 
-        # Select columns dynamically
+        # Select columns dynamically based on master config settings
         base_cols = ['participant_id', 'source', 'filename', 'element', 'value', 'cleaned_value']
-        optional_cols = ['extraction_order', 'extraction_position', 'flags', 'flag_reasons']
+
+        # Build optional columns list based on config settings
+        optional_cols = []
+        if self.include_extraction_order:
+            optional_cols.append('extraction_order')
+        if self.include_extraction_position:
+            optional_cols.append('extraction_position')
+        if self.include_flags:
+            optional_cols.append('flags')
+        if self.include_flag_reasons:
+            optional_cols.append('flag_reasons')
+
         columns = [c for c in base_cols + optional_cols if c in report_df.columns] + ['Document Link']
 
         report_df = report_df[columns]
