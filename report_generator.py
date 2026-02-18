@@ -121,8 +121,15 @@ class ReportGenerator:
         df['filename'] = df['filename'].apply(
             lambda x: x.rsplit('.', 1)[0] if pd.notna(x) and '.' in x else x
         )
+
+        # Use pdf_filename for links if available, otherwise fall back to original filename
+        def get_link_filename(row):
+            if 'pdf_filename' in row and pd.notna(row.get('pdf_filename')):
+                return row['pdf_filename']
+            return row['_original_filename']
+
         df['Document Link'] = df.apply(
-            lambda row: self._create_sharepoint_link(row['source'], row['_original_filename']),
+            lambda row: self._create_sharepoint_link(row['source'], get_link_filename(row)),
             axis=1
         )
         return df

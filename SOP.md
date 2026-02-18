@@ -164,6 +164,7 @@ Input Documents (.txt)
 | `sharepoint_base_url` | SharePoint | Base URL for document links |
 | `hyperlink_style` | SharePoint | Display style: "full" or "short" |
 | `output_link_extension` | SharePoint | File extension for links |
+| `pdf_source_path` | Sources | Local path to PDF files for matching |
 | `spell_check_threshold` | Cleaning | Jaro-Winkler threshold (0.0-1.0) |
 | `positional_outlier_threshold` | Validation | Z-score threshold |
 | `within_document_gap_threshold` | Validation | Max character gap |
@@ -255,10 +256,22 @@ output_file_name = "Birth_Certificate_extractions.xlsx"
 | `extract_from_file()` | Extract all elements from a file |
 | `extract_element()` | Extract single element with pattern |
 | `extract_name()` | Extract names using anchors |
-| `extract_id_from_filename()` | Get participant ID from filename |
+| `find_matching_pdf()` | Find matching PDF file for a text file |
+| `extract_id_from_filename()` | Get participant ID (SSN) from filename |
 | `apply_duplicate_mappings()` | Rename 2nd+ occurrences |
 | `deduplicate_extractions()` | Remove duplicate values |
 | `extract_from_folder()` | Process all files in folder |
+
+**PDF Filename Matching:**
+The tool matches text files to PDF files with different naming conventions:
+```
+Text file: SSN_DOCID_1_Page_N.txt     → 000000000_00000000_1_Page_5.txt
+PDF file:  2_SSN_DOCID_SOURCE_Page_N.pdf → 2_000000000_00000000_Birth_Certificate_Page_5.pdf
+```
+
+Both `filename` (text) and `pdf_filename` (PDF) are stored in extractions:
+- `filename` - Used for display and grouping
+- `pdf_filename` - Used for SharePoint links
 
 **Duplicate Mappings:**
 When a document has intentionally repeated elements (e.g., participant DOB and spouse DOB):
@@ -612,18 +625,32 @@ For documents with intentionally repeated elements (e.g., participant and spouse
 
 ### Procedure D4: Customizing Participant ID Extraction
 
-1. **Edit extractor.py:**
-   ```python
-   def extract_id_from_filename(self, filename):
-       """Extract participant ID from filename."""
-       # Example: "ABC_12345_form.txt" -> "12345"
-       match = re.search(r'_(\d{5})_', filename)
-       if match:
-           return match.group(1)
+The tool extracts participant ID (SSN) from filenames automatically:
 
-       # Add more patterns as needed
-       return None
-   ```
+**Supported formats:**
+- PDF format: `2_SSN_DOCID_SOURCENAME_Page_N.pdf` → extracts SSN from 2nd part
+- Text format: `SSN_DOCID_1_Page_N.txt` → extracts SSN from 1st part
+
+**To customize for different formats, edit extractor.py:**
+```python
+def extract_id_from_filename(self, filename):
+    """Extract participant ID from filename."""
+    base_name = filename.rsplit('.', 1)[0]
+    parts = base_name.split('_')
+
+    # PDF format: 2_SSN_DOCID_...
+    if parts[0] == '2' and len(parts) >= 3:
+        ssn = parts[1]
+        if re.match(r'^\d{9}$', ssn):
+            return ssn
+
+    # Text format: SSN_DOCID_...
+    ssn = parts[0]
+    if re.match(r'^\d{9}$', ssn):
+        return ssn
+
+    return None
+```
 
 ---
 
@@ -647,6 +674,14 @@ hyperlink_style = "short"
 
 # File extension for output document links
 output_link_extension = ".pdf"
+
+
+[Sources]
+# Local path to PDF source files for filename matching
+# Structure: {pdf_source_path}/{SourceName}/{pdf_files}
+# Text files: SSN_DOCID_1_Page_N.txt
+# PDF files:  2_SSN_DOCID_SOURCENAME_Page_N.pdf
+pdf_source_path = ""
 
 
 [Cleaning]

@@ -7,7 +7,7 @@ Provides default values for all settings if config file is missing or incomplete
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import toml
 
 logger = logging.getLogger(__name__)
@@ -17,12 +17,10 @@ DEFAULTS = {
     'SharePoint': {
         'base_url': 'https://yourcompany.sharepoint.com/sites/yoursite/',
         'hyperlink_style': 'short',
+        'output_link_extension': '.pdf',
     },
-    'Defaults': {
-        'patterns_file': 'patterns_example.py',
-        'log_level': 'INFO',
-        'skip_cleaning': False,
-        'skip_report': False,
+    'Sources': {
+        'pdf_source_path': '',
     },
     'Cleaning': {
         'spell_check_threshold': 0.85,
@@ -33,7 +31,6 @@ DEFAULTS = {
     },
     'FileTypes': {
         'supported_extensions': ['.txt'],
-        'output_link_extension': '.pdf',
     },
     'Output': {
         'include_extraction_order': True,
@@ -129,29 +126,19 @@ class MasterConfig:
             return 'short'
         return style
 
+    @property
+    def output_link_extension(self) -> str:
+        """File extension for output document links."""
+        return self._get_nested('SharePoint', 'output_link_extension')
+
     # ====================
-    # DEFAULT SETTINGS
+    # SOURCES SETTINGS
     # ====================
 
     @property
-    def default_patterns_file(self) -> str:
-        """Default patterns file path."""
-        return self._get_nested('Defaults', 'patterns_file')
-
-    @property
-    def default_log_level(self) -> str:
-        """Default logging level."""
-        return self._get_nested('Defaults', 'log_level')
-
-    @property
-    def default_skip_cleaning(self) -> bool:
-        """Default value for skip_cleaning flag."""
-        return self._get_nested('Defaults', 'skip_cleaning')
-
-    @property
-    def default_skip_report(self) -> bool:
-        """Default value for skip_report flag."""
-        return self._get_nested('Defaults', 'skip_report')
+    def pdf_source_path(self) -> str:
+        """Local path to PDF source files for filename matching."""
+        return self._get_nested('Sources', 'pdf_source_path')
 
     # ====================
     # CLEANING SETTINGS
@@ -181,14 +168,9 @@ class MasterConfig:
     # ====================
 
     @property
-    def supported_extensions(self) -> list:
+    def supported_extensions(self) -> List[str]:
         """List of supported file extensions for extraction."""
         return self._get_nested('FileTypes', 'supported_extensions')
-
-    @property
-    def output_link_extension(self) -> str:
-        """File extension for output document links."""
-        return self._get_nested('FileTypes', 'output_link_extension')
 
     # ====================
     # OUTPUT SETTINGS
@@ -240,10 +222,10 @@ class MasterConfig:
         print(f"\n  SharePoint:")
         print(f"    Base URL: {self.sharepoint_base_url}")
         print(f"    Hyperlink style: {self.hyperlink_style}")
+        print(f"    Output link extension: {self.output_link_extension}")
 
-        print(f"\n  Defaults:")
-        print(f"    Patterns file: {self.default_patterns_file}")
-        print(f"    Log level: {self.default_log_level}")
+        print(f"\n  Sources:")
+        print(f"    PDF source path: {self.pdf_source_path or '(not configured)'}")
 
         print(f"\n  Cleaning:")
         print(f"    Spell check threshold: {self.spell_check_threshold}")
@@ -251,6 +233,15 @@ class MasterConfig:
         print(f"\n  Validation:")
         print(f"    Positional outlier threshold: {self.positional_outlier_threshold}")
         print(f"    Within-document gap threshold: {self.within_document_gap_threshold}")
+
+        print(f"\n  FileTypes:")
+        print(f"    Supported extensions: {self.supported_extensions}")
+
+        print(f"\n  Output:")
+        print(f"    Include extraction order: {self.include_extraction_order}")
+        print(f"    Include extraction position: {self.include_extraction_position}")
+        print(f"    Include flags: {self.include_flags}")
+        print(f"    Include flag reasons: {self.include_flag_reasons}")
 
         print("-" * 40)
 
