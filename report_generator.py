@@ -135,6 +135,174 @@ class ReportGenerator:
         return df
 
     # ====================
+    # BEST DATA HELPERS
+    # ====================
+
+    def _pick_highest_priority_row(self, group: pd.DataFrame, element: str, source_priority: dict) -> pd.Series:
+        """Return the row from the highest priority source for this element."""
+        from priority_loader import get_highest_priority_source
+        sources_present = group['source'].unique().tolist()
+        chosen_source = get_highest_priority_source(sources_present, element, source_priority)
+        matching = group[group['source'] == chosen_source]
+        return matching.iloc[0]
+
+    def _build_best_data_row(self, participant_id, element: str, row: pd.Series, notes: str) -> dict:
+        """Build a single row dict for the Best Data tab."""
+        pdf_filename = row.get('pdf_filename')
+        link_filename = pdf_filename if pd.notna(pdf_filename) else row.get('filename', '')
+        return {
+            'Participant ID': participant_id,
+            'Element': element,
+            'Value': row.get('value'),
+            'Cleaned Value': row.get('cleaned_value'),
+            'Source': row.get('source'),
+            'Document Link': self._create_sharepoint_link(str(row.get('source', '')), link_filename),
+            'Notes': notes
+        }
+
+    def _compute_best_and_review(self, df: pd.DataFrame, source_priority: dict):
+        """
+        Core logic: determine best value per participant+element and which rows go to review.
+
+        Cases:
+            A - 1 unique value across all sources → Best Data: YES, Review: NO
+            B - Multiple values, all from same source → Best Data: OMITTED, Review: YES
+            C - Multiple values, from different sources → Best Data: YES (highest priority),
+                                                          Review: YES (all conflicting rows)
+
+        Returns:
+            best_rows  : list of dicts for Best Data tab
+            review_entries : list of (original_df_index, in_best_data_note) tuples
+        """
+        best_rows = []
+        review_entries = []  # (idx, note_string)
+
+        df_valid = df[df['participant_id'].notna()].copy()
+        if df_valid.empty:
+            return best_rows, review_entries
+
+        for (participant_id, element), group in df_valid.groupby(['participant_id', 'element']):
+            # Focus on rows that actually have a value
+            with_values = group[group['cleaned_value'].notna()]
+            if with_values.empty:
+                with_values = group[group['value'].notna()]
+            if with_values.empty:
+                continue  # No value extracted at all — skip
+
+            # Build source → set of unique values map
+            source_values: dict = {}
+            for idx, row in with_values.iterrows():
+                src = row['source']
+                val = row.get('cleaned_value') if pd.notna(row.get('cleaned_value')) else row.get('value')
+                if src not in source_values:
+                    source_values[src] = {'values': set(), 'indices': []}
+                if pd.notna(val):
+                    source_values[src]['values'].add(str(val))
+                source_values[src]['indices'].append(idx)
+
+            all_unique_vals = set()
+            for sv in source_values.values():
+                all_unique_vals.update(sv['values'])
+
+            num_sources = len(source_values)
+
+            if len(all_unique_vals) <= 1:
+                # Case A: All agree (or only one value found)
+                if num_sources == 1:
+                    notes = "Extracted from 1 document"
+                else:
+                    notes = f"Same value extracted from {num_sources} documents"
+
+                chosen_row = self._pick_highest_priority_row(with_values, element, source_priority)
+                best_rows.append(self._build_best_data_row(participant_id, element, chosen_row, notes))
+
+            else:
+                # Conflict exists — check if same or cross-source
+                if num_sources == 1:
+                    # Case B: Same-source conflict — omit from Best Data
+                    for sv in source_values.values():
+                        for idx in sv['indices']:
+                            review_entries.append((idx, "No - Same source conflict"))
+                else:
+                    # Case C: Cross-source conflict — use highest priority source
+                    notes = (
+                        f"Element found in {num_sources} documents with conflicts. "
+                        "Highest priority source chosen"
+                    )
+                    chosen_row = self._pick_highest_priority_row(with_values, element, source_priority)
+                    best_rows.append(self._build_best_data_row(participant_id, element, chosen_row, notes))
+
+                    chosen_source = chosen_row['source']
+                    for src, sv in source_values.items():
+                        in_best = (src == chosen_source)
+                        note = "Yes - Used as Best Value" if in_best else "No - Lower priority source"
+                        for idx in sv['indices']:
+                            review_entries.append((idx, note))
+
+        return best_rows, review_entries
+
+    def create_best_data_tab(self, df: pd.DataFrame, source_priority: dict) -> pd.DataFrame:
+        """
+        Create Best Data tab — one row per participant+element with the chosen best value.
+        Sorted by Participant ID then Element.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        logger.info("Creating Best Data tab")
+        best_rows, _ = self._compute_best_and_review(df, source_priority)
+
+        if not best_rows:
+            logger.warning("No best data rows generated")
+            return pd.DataFrame()
+
+        best_df = pd.DataFrame(best_rows)
+        best_df = best_df.sort_values(['Participant ID', 'Element'])
+        logger.info(f"Best Data tab ready with {len(best_df)} rows")
+        return best_df
+
+    def create_review_tab(self, df: pd.DataFrame, source_priority: dict) -> pd.DataFrame:
+        """
+        Create Review tab — all conflicting rows (Cases B and C), sorted and
+        color-banded by participant. Includes 'In Best Data' column.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        logger.info("Creating Review tab")
+        _, review_entries = self._compute_best_and_review(df, source_priority)
+
+        if not review_entries:
+            logger.info("No conflicting rows — Review tab will be empty")
+            return pd.DataFrame()
+
+        # Build index → note map (deduplicate by index, keeping first assignment)
+        idx_note_map = {}
+        for idx, note in review_entries:
+            if idx not in idx_note_map:
+                idx_note_map[idx] = note
+
+        review_df = df.loc[list(idx_note_map.keys())].copy()
+        review_df['In Best Data'] = review_df.index.map(idx_note_map)
+
+        # Add links
+        review_df = self._prepare_filename_and_link(review_df)
+
+        # Select columns
+        base_cols = ['participant_id', 'source', 'filename', 'element', 'value', 'cleaned_value']
+        columns = [c for c in base_cols if c in review_df.columns]
+        columns += ['In Best Data', 'Document Link']
+        review_df = review_df[[c for c in columns if c in review_df.columns]]
+
+        # Sort by participant then source
+        sort_cols = [c for c in ['participant_id', 'source'] if c in review_df.columns]
+        if sort_cols:
+            review_df = review_df.sort_values(sort_cols)
+
+        logger.info(f"Review tab ready with {len(review_df)} rows")
+        return review_df
+
+    # ====================
     # TAB GENERATION
     # ====================
 
@@ -175,59 +343,6 @@ class ReportGenerator:
 
         return report_df
 
-    def create_participant_summary(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create compact participant summary for large datasets."""
-        df_with_id = self._validate_participant_df(df, "participant summary")
-        if df_with_id.empty:
-            return pd.DataFrame()
-
-        logger.info("Creating Participant Summary")
-        all_elements = sorted(df_with_id['element'].unique())
-        total_elements = len(all_elements)
-        summary_rows = []
-
-        for participant_id, participant_group in df_with_id.groupby('participant_id'):
-            quality_counts = {'Good': 0, 'Review': 0, 'Conflict': 0, 'Missing': 0}
-            issue_elements = {'Good': [], 'Conflict': [], 'Review': [], 'Missing': []}
-
-            for element in all_elements:
-                element_data = participant_group[participant_group['element'] == element]
-                quality, _, _ = self._get_element_quality(element_data)
-                quality_counts[quality] += 1
-                issue_elements[quality].append(element)
-
-            # Calculate metrics
-            completeness_pct = (quality_counts['Good'] / total_elements * 100) if total_elements > 0 else 0
-            non_missing = quality_counts['Good'] + quality_counts['Review'] + quality_counts['Conflict']
-            quality_pct = (quality_counts['Good'] / non_missing * 100) if non_missing > 0 else 0
-
-            # Format element lists
-            complete_str = ', '.join(issue_elements['Good']) if issue_elements['Good'] else ''
-            missing_str = ', '.join(issue_elements['Missing']) if issue_elements['Missing'] else ''
-            conflict_str = ', '.join(issue_elements['Conflict']) if issue_elements['Conflict'] else ''
-
-            summary_rows.append({
-                'Participant ID': participant_id,
-                'Completeness %': round(completeness_pct, 1),
-                'Quality %': round(quality_pct, 1),
-                'Good': quality_counts['Good'],
-                'Review': quality_counts['Review'],
-                'Conflicts': quality_counts['Conflict'],
-                'Missing': quality_counts['Missing'],
-                'Total': total_elements,
-                'Sources': len(participant_group['source'].unique()),
-                'Complete Elements': complete_str,
-                'Missing Elements': missing_str,
-                'Conflicting Elements': conflict_str
-            })
-
-        summary_df = pd.DataFrame(summary_rows)
-
-        # Sort by conflicts (high to low), then completeness (low to high)
-        summary_df = summary_df.sort_values(['Conflicts', 'Completeness %'], ascending=[False, True])
-
-        logger.info(f"Participant Summary ready with {len(summary_df)} participants")
-        return summary_df
     def create_source_statistics_tab(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create source-level statistics."""
         if df.empty:
@@ -398,8 +513,8 @@ class ReportGenerator:
                 # Apply conditional formatting
                 self._apply_formatting_rules(ws, col_map)
 
-                # Apply color banding by participant for All Extracted Data tab
-                if ws.title == 'All Extracted Data':
+                # Apply color banding by participant for All Extracted Data and Review tabs
+                if ws.title in ('All Extracted Data', 'Review'):
                     self._apply_participant_color_banding(ws, headers)
 
                 # Process hyperlinks
@@ -555,31 +670,70 @@ class ReportGenerator:
     # MAIN REPORT GENERATION
     # ====================
 
-    def generate_interactive_report(self, validated_df: pd.DataFrame, output_path: str, plan_name: str) -> str:
-        """Generate comprehensive interactive Excel report."""
+    def generate_interactive_report(
+        self,
+        validated_df: pd.DataFrame,
+        output_path: str,
+        plan_name: str,
+        source_priority: dict = None
+    ) -> str:
+        """
+        Generate comprehensive interactive Excel report.
+
+        Args:
+            validated_df: Full validated extractions DataFrame
+            output_path: Output file path for the Excel report
+            plan_name: Plan name for logging
+            source_priority: Dict mapping element -> ordered list of sources (highest first).
+                            Load with priority_loader.load_source_priority(). If None or empty,
+                            falls back to first available source for conflicts.
+        """
+        source_priority = source_priority or {}
         logger.info(f"Generating interactive report for {plan_name}")
 
-        # Generate tabs
-        participant_summary = self.create_participant_summary(validated_df)
+        # Compute best data and review together (single pass through data)
+        best_rows, review_entries = self._compute_best_and_review(validated_df, source_priority)
+
+        # Build each tab
+        best_data = pd.DataFrame(best_rows).sort_values(['Participant ID', 'Element']) if best_rows else pd.DataFrame()
+
+        # Review tab needs separate build (uses review_entries from above)
+        if review_entries:
+            idx_note_map = {}
+            for idx, note in review_entries:
+                if idx not in idx_note_map:
+                    idx_note_map[idx] = note
+            review_df = validated_df.loc[list(idx_note_map.keys())].copy()
+            review_df['In Best Data'] = review_df.index.map(idx_note_map)
+            review_df = self._prepare_filename_and_link(review_df)
+            base_cols = ['participant_id', 'source', 'filename', 'element', 'value', 'cleaned_value']
+            review_cols = [c for c in base_cols if c in review_df.columns] + ['In Best Data', 'Document Link']
+            review_df = review_df[[c for c in review_cols if c in review_df.columns]]
+            sort_cols = [c for c in ['participant_id', 'source'] if c in review_df.columns]
+            if sort_cols:
+                review_df = review_df.sort_values(sort_cols)
+        else:
+            review_df = pd.DataFrame()
+
         all_data = self.create_all_data_tab(validated_df)
-        source_stats = self.create_source_statistics_tab(validated_df)
         participant_stats = self.create_participant_statistics_tab(validated_df)
+        source_stats = self.create_source_statistics_tab(validated_df)
 
         # Write to Excel
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             tabs = [
-                (participant_summary, 'Participant Summary'),
+                (best_data, 'Best Data'),
                 (all_data, 'All Extracted Data'),
+                (review_df, 'Review'),
+                (participant_stats, 'Participant Statistics'),
                 (source_stats, 'Source Statistics'),
-                (participant_stats, 'Participant Statistics')
             ]
-
             for df, sheet_name in tabs:
                 if not df.empty:
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
                     logger.info(f"Added {sheet_name}: {len(df)} rows")
 
-        # Apply formatting (including color banding)
+        # Apply formatting
         self.apply_excel_formatting(output_path)
 
         logger.info(f"Interactive report generated: {output_path}")
